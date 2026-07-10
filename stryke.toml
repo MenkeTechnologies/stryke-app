@@ -1,0 +1,21 @@
+[package]
+name = "stryke-app"
+version = "0.1.0"
+description = "App automation for stryke — drive MenkeTechnologies GUI apps over the GUI Automation Bus. cdylib package loaded in-process via dlopen on first `use App`. Holds a per-app Unix-socket connection in a pool; no subprocess fork per call."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-app"
+edition = "2026"
+
+[ffi]
+lib-name = "stryke_app"
+namespace = "App"
+exports = [
+    "app__call",
+    "app__get",
+    "app__list",
+    "app__open",
+    "app__poll",
+    "app__sub",
+    "app__verbs",
+]
