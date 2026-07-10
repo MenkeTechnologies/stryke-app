@@ -1,0 +1,72 @@
+## lib/App.stk — App automation for stryke (`use App`).
+##
+## The stryke-side wrapper over the `stryke-app` cdylib's `app__*` exports. Drives
+## MenkeTechnologies GUI apps by NAME over the GUI Automation Bus:
+## `App::open("zcite")->call("bib.styles", {})`, or `App::here()` from a hook
+## running inside an app. Semantic counterpart to `use GUI` (pixel/OS input) —
+## GUI:: moves the mouse, App:: calls a named app's verbs and reads values back.
+## See GUI_AUTOMATION_BUS.md.
+##
+## Each wrapper builds a JSON args dict, calls the `app__*` FFI symbol, and
+## decodes the JSON return (dying on a reported error).
+
+package App
+
+## Decode the JSON returned by an `app__*` FFI call; die with a descriptive
+## message when the cdylib reported an error.
+fn App::_decode ($name, $json) {
+    val $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "App::$name: $o->{error}"
+    }
+    $o
+}
+
+## A handle bound to one app's bus name; the OO surface hangs off it.
+fn App::_handle ($name) {
+    bless { app => $name }, "App::Handle"
+}
+
+## Open a running app by name (dies if it isn't running) → a handle.
+fn App::open ($name) {
+    App::_decode("open", app__open(to_json({ app => $name })))
+    App::_handle($name)
+}
+
+## Open the app THIS script runs inside (resolved from $ZGUI_APP) → a handle.
+fn App::here {
+    val $o = App::_decode("here", app__here("{}"))
+    App::_handle($o->{app})
+}
+
+## Every running app's bus name → list.
+fn App::list {
+    @{ App::_decode("list", app__list("{}")) }
+}
+
+package App::Handle
+
+## Invoke a verb; returns its value.
+fn App::Handle::call ($self, $verb, $args = {}) {
+    App::_decode("call", app__call(to_json({ app => $self->{app}, verb => $verb, args => $args })))
+}
+
+## Read a state query; returns its value.
+fn App::Handle::get ($self, $state) {
+    App::_decode("get", app__get(to_json({ app => $self->{app}, state => $state })))
+}
+
+## The app's typed automation surface (verbs / state / events).
+fn App::Handle::verbs ($self) {
+    App::_decode("verbs", app__verbs(to_json({ app => $self->{app} })))
+}
+
+## Subscribe to an event; delivered events buffer until poll().
+fn App::Handle::sub ($self, $event) {
+    App::_decode("sub", app__sub(to_json({ app => $self->{app}, event => $event })))
+}
+
+## Drain the events delivered since the last poll → list.
+fn App::Handle::poll ($self) {
+    @{ App::_decode("poll", app__poll(to_json({ app => $self->{app} }))) }
+}
