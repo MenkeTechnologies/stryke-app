@@ -133,6 +133,22 @@ pub fn open(app: &str) -> Result<Value> {
     Ok(json!({ "app": app, "ok": true }))
 }
 
+/// The name of the app a script is running inside — set by the host in `ZGUI_APP`
+/// before it runs a palette/hook script (`run_stryke_hook`). This is what
+/// `App::here()` resolves so an in-process script drives its own app without
+/// naming it. Errors if unset (the script isn't running inside a bus app).
+pub fn here_name() -> Result<String> {
+    env::var("ZGUI_APP")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("App::here() outside a bus app (ZGUI_APP unset)"))
+}
+
+/// Open the app the current script runs inside (`ZGUI_APP`); `{app, ok:true}`.
+pub fn here() -> Result<Value> {
+    open(&here_name()?)
+}
+
 /// Every running app, by bus name — the `*.sock` files in the socket dir.
 pub fn list() -> Result<Value> {
     let mut apps = Vec::new();

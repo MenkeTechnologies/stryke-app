@@ -77,6 +77,12 @@ pub extern "C" fn app__open(args: *const c_char) -> *const c_char {
     ffi_call(args, |v| client::open(&arg_str(&v, "app")?))
 }
 
+/// `App::here()` — open the app this script runs inside (via `ZGUI_APP`).
+#[no_mangle]
+pub extern "C" fn app__here(_args: *const c_char) -> *const c_char {
+    ffi_call(_args, |_| client::here())
+}
+
 /// `App::list()` — every running app's bus name.
 #[no_mangle]
 pub extern "C" fn app__list(args: *const c_char) -> *const c_char {

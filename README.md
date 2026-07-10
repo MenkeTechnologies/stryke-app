@@ -49,6 +49,7 @@ for val $ev (@{ $cite->poll() }) { p "added: ${ $ev->{payload}{title} }" }
 
 | stryke | FFI export | Purpose |
 | --- | --- | --- |
+| `App::here()` | `app__here` | open the app this script runs inside (`ZGUI_APP`) |
 | `App::open(name)` | `app__open` | confirm reachable + pool the connection |
 | `App::list()` | `app__list` | every running app's bus name |
 | `App::verbs(name)` | `app__verbs` | the typed surface manifest |

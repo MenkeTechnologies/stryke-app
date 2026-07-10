@@ -69,3 +69,23 @@ fn app_module_drives_a_running_host() {
     assert_eq!(arr[0]["event"], "tick");
     assert_eq!(arr[0]["payload"]["n"], 1);
 }
+
+#[test]
+fn here_resolves_the_hosting_app_from_the_env() {
+    let app = format!("stryke-app-here-{}", std::process::id());
+    let _bridge = serve(&app, Mock).expect("serve");
+
+    // unset → App::here() errors (a script not running inside a bus app)
+    std::env::remove_var("ZGUI_APP");
+    assert!(client::here().is_err());
+
+    // the host sets ZGUI_APP before running a hook/palette script
+    std::env::set_var("ZGUI_APP", &app);
+    let here = client::here().expect("here");
+    assert_eq!(here["app"], app);
+    assert_eq!(here["ok"], true);
+
+    // and it reaches the same surface
+    assert_eq!(client::get(&app, "count").expect("get"), json!(42));
+    std::env::remove_var("ZGUI_APP");
+}
