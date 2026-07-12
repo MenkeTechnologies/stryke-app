@@ -17,7 +17,8 @@ state, and subscribe to its events over the **GUI Automation Bus**. Semantic, no
 pixel: where [`stryke-gui`](https://github.com/MenkeTechnologies/stryke-gui) moves
 the mouse, `stryke-app` calls `library.search` and gets rows back. Shipped as a
 cdylib that stryke dlopens in-process on first `use App`; the client holds a
-per-app Unix-socket connection in a process-wide pool (no fork per call).
+per-app connection in a process-wide pool (no fork per call) — a Unix domain
+socket on macOS/Linux, a named pipe on Windows.
 
 Host side: [`zgui-bridge`](https://github.com/MenkeTechnologies/zgui-bridge).
 Design: [`GUI_AUTOMATION_BUS.md`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta/blob/main/GUI_AUTOMATION_BUS.md) (§6 the `App` module, §7 transport).
@@ -60,8 +61,9 @@ for val $ev (@{ $cite->poll() }) { p "added: ${ $ev->{payload}{title} }" }
 
 ## Protocol
 
-Newline-delimited JSON over the app's Unix socket (`$XDG_RUNTIME_DIR/zgui/<app>.sock`,
-else `$TMPDIR/zgui/<app>.sock`). A request stamps a fresh `id`; the client reads until
+Newline-delimited JSON over the app's endpoint — a Unix socket
+(`$XDG_RUNTIME_DIR/zgui/<app>.sock`, else `$TMPDIR/zgui/<app>.sock`) on macOS/Linux, the
+named pipe `\\.\pipe\<app>.sock` on Windows. A request stamps a fresh `id`; the client reads until
 the matching `reply`, buffering any interleaved `event` frames for `poll`. Transport
 errors reconnect once and retry. Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1.
 

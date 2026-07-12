@@ -1,25 +1,80 @@
-//! The bus client: a process-wide pool of per-app Unix-socket connections and the
+//! The bus client: a process-wide pool of per-app connections and the
 //! request/reply + event-poll logic behind the `App` module (see
 //! `GUI_AUTOMATION_BUS.md` §6/§7). Transport errors reconnect once and retry; a
 //! verb that returns `ok:false` is a value the caller sees, not a transport error.
+//!
+//! Transport is per platform, matching the host: a Unix-domain socket
+//! (`$XDG_RUNTIME_DIR/zgui/<app>.sock`) on macOS/Linux, the named pipe
+//! `\\.\pipe\<app>.sock` on Windows. The protocol below is identical on both — the
+//! only platform-specific bits are dialing (`plat::dial`) and the poll drain-mode
+//! toggle (`plat::set_drain_mode`).
 
 use std::collections::HashMap;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use once_cell::sync::OnceCell;
 use serde_json::{json, Value};
 
-/// One live connection to an app's socket, plus its correlation counter and a
-/// buffer of events that arrived while awaiting a reply.
+use plat::Sock;
+
+/* ---- Unix domain socket (macOS / Linux) ---- */
+#[cfg(unix)]
+mod plat {
+    use anyhow::{anyhow, Result};
+    pub use std::os::unix::net::UnixStream as Sock;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Dial the app's Unix socket at `path`.
+    pub fn dial(path: &Path, app: &str) -> Result<Sock> {
+        Sock::connect(path)
+            .map_err(|e| anyhow!("app '{app}' not reachable ({}): {e}", path.display()))
+    }
+
+    /// Toggle the poll drain mode: a short read timeout while draining (so an empty
+    /// bus returns promptly), blocking reads otherwise.
+    pub fn set_drain_mode(s: &Sock, draining: bool) -> std::io::Result<()> {
+        s.set_read_timeout(draining.then(|| Duration::from_millis(20)))
+    }
+}
+
+/* ---- named pipe (Windows) ---- */
+#[cfg(windows)]
+mod plat {
+    use anyhow::{anyhow, Result};
+    pub use interprocess::local_socket::Stream as Sock;
+    use interprocess::local_socket::{prelude::*, GenericNamespaced};
+    use std::path::Path;
+
+    /// Dial the app's named pipe. The leaf of `path` (`<app>.sock`) maps to
+    /// `\\.\pipe\<app>.sock`, matching the host's `to_ns_name::<GenericNamespaced>()`.
+    pub fn dial(path: &Path, app: &str) -> Result<Sock> {
+        let leaf = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let name = leaf
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|e| anyhow!("bad pipe name for app '{app}': {e}"))?;
+        Sock::connect(name)
+            .map_err(|e| anyhow!(r"app '{app}' not reachable (\\.\pipe\{leaf}): {e}"))
+    }
+
+    /// Toggle the poll drain mode: named pipes have no read timeout, so we use
+    /// nonblocking mode while draining (read returns `WouldBlock` when empty) and
+    /// restore blocking mode afterwards.
+    pub fn set_drain_mode(s: &Sock, draining: bool) -> std::io::Result<()> {
+        s.set_nonblocking(draining)
+    }
+}
+
+/// One live connection to an app's endpoint, plus its correlation counter and a
+/// buffer of events that arrived while awaiting a reply. Writes go through the
+/// reader's `get_ref()` (`&Sock: Write`), so a single owned handle serves both
+/// directions — no clone needed (named-pipe handles are not clonable).
 struct Conn {
-    writer: UnixStream,
-    reader: BufReader<UnixStream>,
+    reader: BufReader<Sock>,
     events: Vec<Value>,
     next_id: u64,
 }
@@ -45,10 +100,12 @@ fn socket_path(app: &str) -> PathBuf {
 
 fn connect(app: &str) -> Result<Conn> {
     let path = socket_path(app);
-    let stream = UnixStream::connect(&path)
-        .map_err(|e| anyhow!("app '{app}' not reachable ({}): {e}", path.display()))?;
-    let reader = BufReader::new(stream.try_clone()?);
-    Ok(Conn { writer: stream, reader, events: Vec::new(), next_id: 0 })
+    let sock = plat::dial(&path, app)?;
+    Ok(Conn {
+        reader: BufReader::new(sock),
+        events: Vec::new(),
+        next_id: 0,
+    })
 }
 
 /// Run `f` against the app's pooled connection, dialing it if absent. On a
@@ -79,8 +136,10 @@ fn request(conn: &mut Conn, mut frame: Value) -> Result<Value> {
     frame["id"] = json!(id);
     let mut line = serde_json::to_vec(&frame)?;
     line.push(b'\n');
-    conn.writer.write_all(&line)?;
-    conn.writer.flush()?;
+    // Write through the reader's handle (`&Sock: Write`) — one handle, both directions.
+    let mut w = conn.reader.get_ref();
+    w.write_all(&line)?;
+    w.flush()?;
 
     loop {
         let mut buf = String::new();
@@ -104,14 +163,19 @@ fn unwrap_reply(reply: Value) -> Result<Value> {
     } else {
         Err(anyhow!(
             "{}",
-            reply.get("error").and_then(|e| e.as_str()).unwrap_or("call failed")
+            reply
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("call failed")
         ))
     }
 }
 
 /// Invoke a verb and return its value.
 pub fn call(app: &str, verb: &str, args: Value) -> Result<Value> {
-    let reply = with_conn(app, |c| request(c, json!({ "t": "call", "verb": verb, "args": args })))?;
+    let reply = with_conn(app, |c| {
+        request(c, json!({ "t": "call", "verb": verb, "args": args }))
+    })?;
     unwrap_reply(reply)
 }
 
@@ -150,6 +214,9 @@ pub fn here() -> Result<Value> {
 }
 
 /// Every running app, by bus name — the `*.sock` files in the socket dir.
+///
+/// Unix only: named pipes are not enumerable as filesystem entries, so on Windows
+/// this returns an empty list. Dialing a known app by name still works there.
 pub fn list() -> Result<Value> {
     let mut apps = Vec::new();
     if let Ok(rd) = std::fs::read_dir(socket_dir()) {
@@ -175,9 +242,7 @@ pub fn subscribe(app: &str, event: &str) -> Result<Value> {
 /// pull model, so events surface in stryke's own execution flow).
 pub fn poll(app: &str) -> Result<Value> {
     with_conn(app, |c| {
-        c.reader
-            .get_ref()
-            .set_read_timeout(Some(Duration::from_millis(20)))?;
+        plat::set_drain_mode(c.reader.get_ref(), true)?;
         loop {
             let mut buf = String::new();
             match c.reader.read_line(&mut buf) {
@@ -196,12 +261,12 @@ pub fn poll(app: &str) -> Result<Value> {
                     break
                 }
                 Err(e) => {
-                    let _ = c.reader.get_ref().set_read_timeout(None);
+                    let _ = plat::set_drain_mode(c.reader.get_ref(), false);
                     return Err(e.into());
                 }
             }
         }
-        c.reader.get_ref().set_read_timeout(None)?;
+        plat::set_drain_mode(c.reader.get_ref(), false)?;
         let drained: Vec<Value> = c.events.drain(..).collect();
         Ok(json!(drained))
     })

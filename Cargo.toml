@@ -26,6 +26,12 @@ serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 once_cell = "1"
 
+# The bus client uses native local IPC per platform: std Unix domain sockets on
+# macOS/Linux (no dep), and the named pipe `\\.\pipe\<app>.sock` via `interprocess`
+# on Windows.
+[target.'cfg(windows)'.dependencies]
+interprocess = "2"
+
 [dev-dependencies]
 # The host side of the bus — used only to stand up a real socket in the
 # end-to-end test. Not a runtime dependency (stryke-app is self-contained).

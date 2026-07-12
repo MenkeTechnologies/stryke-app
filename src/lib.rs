@@ -41,7 +41,8 @@ where
         Ok(Err(e)) => json!({ "error": e.to_string() }),
         Err(_) => json!({ "error": "stryke-app handler panicked" }),
     };
-    let s = serde_json::to_string(&out).unwrap_or_else(|_| String::from(r#"{"error":"serialize"}"#));
+    let s =
+        serde_json::to_string(&out).unwrap_or_else(|_| String::from(r#"{"error":"serialize"}"#));
     match CString::new(s) {
         Ok(c) => c.into_raw() as *const c_char,
         Err(_) => std::ptr::null(),
