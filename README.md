@@ -46,6 +46,36 @@ $cite->sub("itemAdded")
 for val $ev (@{ $cite->poll() }) { p "added: ${ $ev->{payload}{title} }" }
 ```
 
+## One transaction across separate applications
+
+A chain that spans several apps unwinds in reverse — the exact reverse of the order the
+steps executed, across process boundaries — when any step fails.
+
+```stryke
+val $txn = App::txn()
+val $ok  = eval {
+    $txn->call("zftp",       "file.push",     %{ path => "app-1.7.2.tar.zst" })
+    $txn->call("zcontainer", "deploy.roll",   %{ service => "web", tag => "1.7.2" })
+    $txn->call("zcite",      "citation.file", %{ doi => "10.0/1.7.2" })
+    1
+}
+if (!$ok) {
+    val $r = $txn->abort()
+    p "unwound ${ $r->{compensated} }; still broken: ${\ scalar @{ $r->{failed} } }"
+} else {
+    $txn->commit()
+}
+```
+
+The first call to an app sends `begin`, so the **app** refuses a verb it cannot undo before
+that verb runs. Each app also journals the chain in parallel, which is the recovery path if
+this script dies mid-flight. `abort` walks this side's journal in descending saga `seq`,
+compensating each step with one `undo` frame to the app that ran it, then releases the app-side
+journals so no inverse runs twice. A compensation that fails does not stop the unwind and is
+reported — globally in `failed[]` and under `apps.<name>.failed[]`.
+
+Design and the reason a per-app `abort` is not enough: `GUI_AUTOMATION_BUS.md` §7.3.
+
 ## Surface
 
 | stryke | FFI export | Purpose |
@@ -58,6 +88,12 @@ for val $ev (@{ $cite->poll() }) { p "added: ${ $ev->{payload}{title} }" }
 | `App::get(name, state)` | `app__get` | read a state query |
 | `App::sub(name, event)` | `app__sub` | subscribe (events buffer) |
 | `App::poll(name)` | `app__poll` | drain events since the last poll |
+| `$h->undo(verb, args, result)` | `app__undo` | compensate one executed verb, out of band |
+| `App::txn([id])` | `app__txn_begin` | open a cross-app compensating transaction |
+| `$txn->call(app, verb, args)` | `app__txn_call` | one journaled step of the transaction |
+| `$txn->steps()` | `app__txn_steps` | `{seq, app, verb}` per forward step so far |
+| `$txn->commit()` | `app__txn_commit` | close it; every app keeps its effects |
+| `$txn->abort()` | `app__txn_abort` | unwind every step in reverse, across every app |
 
 ## Protocol
 
@@ -65,13 +101,15 @@ Newline-delimited JSON over the app's endpoint — a Unix socket
 (`$XDG_RUNTIME_DIR/zgui/<app>.sock`, else `$TMPDIR/zgui/<app>.sock`) on macOS/Linux, the
 named pipe `\\.\pipe\<app>.sock` on Windows. A request stamps a fresh `id`; the client reads until
 the matching `reply`, buffering any interleaved `event` frames for `poll`. Transport
-errors reconnect once and retry. Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1.
+errors reconnect once and retry, re-joining an open transaction on the fresh connection first.
+Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1, transactions in §7.2/§7.3.
 
 ## Build
 
 ```
-cargo build              # cdylib + rlib
-cargo test               # end-to-end against a real zgui-bridge host
+cargo build                         # cdylib + rlib
+cargo test                          # end-to-end against real zgui-bridge hosts
+cargo run --example cross_app_saga  # three live sockets, a failed chain, the reverse unwind
 ```
 
 ## License

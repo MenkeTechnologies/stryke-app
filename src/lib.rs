@@ -11,6 +11,7 @@
 //! `GUI_AUTOMATION_BUS.md` for the design and the `App` module surface (§6).
 
 pub mod client;
+pub mod saga;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -55,6 +56,24 @@ fn arg_str(v: &Value, key: &str) -> Result<String> {
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow::anyhow!("missing '{key}' argument"))
+}
+
+/// `u64` field `key` from a JSON args object, or an error naming it. Accepts a JSON
+/// string too: a transaction id is `pid<<32|n`, which exceeds the exact-integer range
+/// of a f64-backed number in some encoders.
+fn arg_u64(v: &Value, key: &str) -> Result<u64> {
+    match v.get(key) {
+        Some(Value::Number(n)) if n.is_u64() => Ok(n.as_u64().unwrap()),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|f| *f >= 0.0)
+            .map(|f| f as u64)
+            .ok_or_else(|| anyhow::anyhow!("'{key}' is not a transaction id")),
+        Some(Value::String(s)) => s
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("'{key}' is not a transaction id: {s}")),
+        _ => Err(anyhow::anyhow!("missing '{key}' argument")),
+    }
 }
 
 /// Free a C string previously returned by an export of this cdylib. stryke's FFI
@@ -131,4 +150,66 @@ pub extern "C" fn app__sub(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn app__poll(args: *const c_char) -> *const c_char {
     ffi_call(args, |v| client::poll(&arg_str(&v, "app")?))
+}
+
+/* ---- cross-app transactions (GUI_AUTOMATION_BUS.md §7.2) ---- */
+
+/// `App::txn()` — open a saga spanning any number of apps; returns `{txn}`. An
+/// explicit `txn` joins an id another process already opened.
+#[no_mangle]
+pub extern "C" fn app__txn_begin(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| {
+        // Absent or explicitly null both mean "mint one"; stryke's `to_json` of an
+        // omitted optional argument produces the latter.
+        let txn = match v.get("txn") {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(arg_u64(&v, "txn")?),
+        };
+        saga::begin(txn)
+    })
+}
+
+/// `$txn->call(app, verb, args)` — one step of the saga; journaled on success.
+#[no_mangle]
+pub extern "C" fn app__txn_call(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| {
+        let txn = arg_u64(&v, "txn")?;
+        let app = arg_str(&v, "app")?;
+        let verb = arg_str(&v, "verb")?;
+        let call_args = v.get("args").cloned().unwrap_or(Value::Null);
+        saga::call(txn, &app, &verb, call_args)
+    })
+}
+
+/// `$txn->commit()` — close the saga, compensating nothing.
+#[no_mangle]
+pub extern "C" fn app__txn_commit(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| saga::commit(arg_u64(&v, "txn")?))
+}
+
+/// `$txn->abort()` — unwind every step in reverse across every app; returns the report.
+#[no_mangle]
+pub extern "C" fn app__txn_abort(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| saga::abort(arg_u64(&v, "txn")?))
+}
+
+/// `$txn->steps()` — the forward steps so far, `[{seq, app, verb}]`.
+#[no_mangle]
+pub extern "C" fn app__txn_steps(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| saga::steps(arg_u64(&v, "txn")?))
+}
+
+/// `$h->undo(verb, args, result)` — compensate one executed verb out of band.
+#[no_mangle]
+pub extern "C" fn app__undo(args: *const c_char) -> *const c_char {
+    ffi_call(args, |v| {
+        let app = arg_str(&v, "app")?;
+        let verb = arg_str(&v, "verb")?;
+        client::undo(
+            &app,
+            &verb,
+            v.get("args").cloned().unwrap_or(Value::Null),
+            v.get("result").cloned().unwrap_or(Value::Null),
+        )
+    })
 }

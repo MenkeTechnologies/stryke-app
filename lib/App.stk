@@ -44,6 +44,16 @@ fn App::list {
     @{ App::_decode("list", app__list("{}")) }
 }
 
+## Open a compensating transaction spanning ANY number of apps → an App::Txn handle.
+## Steps run through $txn->call(...) are journaled in one global order; $txn->abort()
+## unwinds every one of them in reverse, across app boundaries. Pass $id to join a
+## transaction another process opened; omit it for a fresh, process-unique id.
+## See GUI_AUTOMATION_BUS.md §7.2.
+fn App::txn ($id = undef) {
+    val $o = App::_decode("txn", app__txn_begin(to_json({ txn => $id })))
+    bless { txn => $o->{txn} }, "App::Txn"
+}
+
 package App::Handle
 
 ## Invoke a verb; returns its value.
@@ -69,4 +79,46 @@ fn App::Handle::sub ($self, $event) {
 ## Drain the events delivered since the last poll → list.
 fn App::Handle::poll ($self) {
     @{ App::_decode("poll", app__poll(to_json({ app => $self->{app} }))) }
+}
+
+## Compensate one already-executed verb, out of band. Quote back the args it ran
+## with and the value it returned — that pair is the app's undo handle.
+fn App::Handle::undo ($self, $verb, $args = {}, $result = {}) {
+    App::_decode("undo", app__undo(to_json({ app => $self->{app}, verb => $verb, args => $args, result => $result })))
+}
+
+package App::Txn
+
+## The bus name behind either an App::Handle or a plain name string.
+fn App::Txn::_name ($app) {
+    ref $app ? $app->{app} : $app
+}
+
+## Run one step of the transaction against $app (handle or name); returns the verb's
+## value. Dies if the app classes the verb irreversible — refused BEFORE it runs, so a
+## chain never contains a step that cannot be unwound.
+fn App::Txn::call ($self, $app, $verb, $args = {}) {
+    App::_decode("txn.call", app__txn_call(to_json({
+        txn  => $self->{txn},
+        app  => App::Txn::_name($app),
+        verb => $verb,
+        args => $args,
+    })))
+}
+
+## The forward steps so far → list of { seq, app, verb }, in execution order.
+fn App::Txn::steps ($self) {
+    @{ App::_decode("txn.steps", app__txn_steps(to_json({ txn => $self->{txn} }))) }
+}
+
+## Close the transaction; every app keeps its effects. Compensates nothing.
+fn App::Txn::commit ($self) {
+    App::_decode("txn.commit", app__txn_commit(to_json({ txn => $self->{txn} })))
+}
+
+## Unwind everything in reverse execution order across every app. Returns the report:
+## { txn, ok, compensated, order, failed, apps } — `failed` names every compensation
+## that could not complete, and `apps` groups them by application.
+fn App::Txn::abort ($self) {
+    App::_decode("txn.abort", app__txn_abort(to_json({ txn => $self->{txn} })))
 }

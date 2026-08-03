@@ -77,6 +77,10 @@ struct Conn {
     reader: BufReader<Sock>,
     events: Vec<Value>,
     next_id: u64,
+    /// The transaction this connection has open on the host, if any. The host
+    /// keeps that state **per connection** (`zgui-bridge` `handle_conn`'s
+    /// `open_txn`), so a reconnect has to re-join it — see [`with_conn`].
+    open_txn: Option<u64>,
 }
 
 fn pool() -> &'static Mutex<HashMap<String, Conn>> {
@@ -105,12 +109,19 @@ fn connect(app: &str) -> Result<Conn> {
         reader: BufReader::new(sock),
         events: Vec::new(),
         next_id: 0,
+        open_txn: None,
     })
 }
 
 /// Run `f` against the app's pooled connection, dialing it if absent. On a
 /// transport error, reconnect once and retry — this absorbs an app that
 /// restarted between calls (RFC §13.1: hold, reconnect on EPIPE).
+///
+/// A connection that was inside a transaction re-joins it on the fresh socket
+/// before the retry. The host's `open_txn` is per connection while its journal is
+/// per process, so re-sending `begin` rejoins the *same* journal; skipping it
+/// would let the retried call run untransacted — executed, unjournaled, and
+/// therefore silently un-unwindable by a later abort.
 fn with_conn<T>(app: &str, f: impl Fn(&mut Conn) -> Result<T>) -> Result<T> {
     let mut guard = pool().lock().unwrap();
     if !guard.contains_key(app) {
@@ -120,7 +131,12 @@ fn with_conn<T>(app: &str, f: impl Fn(&mut Conn) -> Result<T>) -> Result<T> {
     match f(guard.get_mut(app).unwrap()) {
         Ok(v) => Ok(v),
         Err(_) => {
-            let c = connect(app)?;
+            let open_txn = guard.get(app).and_then(|c| c.open_txn);
+            let mut c = connect(app)?;
+            if let Some(txn) = open_txn {
+                unwrap_reply(request(&mut c, json!({ "t": "begin", "txn": txn }))?)?;
+                c.open_txn = Some(txn);
+            }
             guard.insert(app.to_string(), c);
             f(guard.get_mut(app).unwrap())
         }
@@ -175,6 +191,68 @@ fn unwrap_reply(reply: Value) -> Result<Value> {
 pub fn call(app: &str, verb: &str, args: Value) -> Result<Value> {
     let reply = with_conn(app, |c| {
         request(c, json!({ "t": "call", "verb": verb, "args": args }))
+    })?;
+    unwrap_reply(reply)
+}
+
+/* ---- transaction frames (GUI_AUTOMATION_BUS.md §7.2) ---- */
+
+/// Open transaction `txn` on `app`: every subsequent [`call`] on this app's pooled
+/// connection is journaled by the host under `txn`, and a verb whose reversibility
+/// class is `irreversible` is refused before it runs.
+///
+/// The host treats a `begin` for an already-open transaction as a **join**, not a
+/// collision — that is what lets several apps (and several connections) share one
+/// transaction id.
+pub fn begin(app: &str, txn: u64) -> Result<Value> {
+    let reply = with_conn(app, |c| {
+        let r = request(c, json!({ "t": "begin", "txn": txn }));
+        if r.is_ok() {
+            c.open_txn = Some(txn);
+        }
+        r
+    })?;
+    unwrap_reply(reply)
+}
+
+/// Close `txn` on `app`, discarding its journal. No compensation runs.
+pub fn commit(app: &str, txn: u64) -> Result<Value> {
+    let reply = with_conn(app, |c| {
+        let r = request(c, json!({ "t": "commit", "txn": txn }));
+        if r.is_ok() && c.open_txn == Some(txn) {
+            c.open_txn = None;
+        }
+        r
+    })?;
+    unwrap_reply(reply)
+}
+
+/// Abort `txn` on `app`: the host compensates every step **it** journaled, in
+/// descending `seq`, and replies `{compensated, failed:[…]}`.
+///
+/// This unwinds one app. Its `seq` clock is private to that app's process, so it
+/// cannot order steps against another app's — a chain spanning several apps is
+/// unwound by [`crate::saga`], which keeps the cross-app order itself.
+pub fn abort(app: &str, txn: u64) -> Result<Value> {
+    let reply = with_conn(app, |c| {
+        let r = request(c, json!({ "t": "abort", "txn": txn }));
+        if r.is_ok() && c.open_txn == Some(txn) {
+            c.open_txn = None;
+        }
+        r
+    })?;
+    unwrap_reply(reply)
+}
+
+/// Compensate one already-executed verb out of band, quoting back the `args` it ran
+/// with and the `result` it returned. This is the single-step primitive a cross-app
+/// unwind is built from, because the caller — not the host — chooses the order.
+pub fn undo(app: &str, verb: &str, args: Value, result: Value) -> Result<Value> {
+    let reply = with_conn(app, |c| {
+        request(
+            c,
+            json!({ "t": "undo", "verb": verb, "args": args, "result": result }),
+        )
     })?;
     unwrap_reply(reply)
 }
