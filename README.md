@@ -21,7 +21,7 @@ per-app connection in a process-wide pool (no fork per call) — a Unix domain
 socket on macOS/Linux, a named pipe on Windows.
 
 Host side: [`zgui-bridge`](https://github.com/MenkeTechnologies/zgui-bridge).
-Design: [`GUI_AUTOMATION_BUS.md`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta/blob/main/GUI_AUTOMATION_BUS.md) (§6 the `App` module, §7 transport).
+Design: [`GUI_AUTOMATION_BUS.md`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta/blob/main/docs/GUI_AUTOMATION_BUS.md) (§6 the `App` module, §7 transport).
 
 ---
 
@@ -74,7 +74,7 @@ compensating each step with one `undo` frame to the app that ran it, then releas
 journals so no inverse runs twice. A compensation that fails does not stop the unwind and is
 reported — globally in `failed[]` and under `apps.<name>.failed[]`.
 
-Design and the reason a per-app `abort` is not enough: `GUI_AUTOMATION_BUS.md` §7.3.
+Design and the reason a per-app `abort` is not enough: `docs/GUI_AUTOMATION_BUS.md` §7.3.
 
 ## Surface
 
@@ -83,11 +83,11 @@ Design and the reason a per-app `abort` is not enough: `GUI_AUTOMATION_BUS.md` �
 | `App::here()` | `app__here` | open the app this script runs inside (`ZGUI_APP`) |
 | `App::open(name)` | `app__open` | confirm reachable + pool the connection |
 | `App::list()` | `app__list` | every running app's bus name |
-| `App::verbs(name)` | `app__verbs` | the typed surface manifest |
-| `App::call(name, verb, args)` | `app__call` | invoke a verb, return its value |
-| `App::get(name, state)` | `app__get` | read a state query |
-| `App::sub(name, event)` | `app__sub` | subscribe (events buffer) |
-| `App::poll(name)` | `app__poll` | drain events since the last poll |
+| `$h->verbs()` | `app__verbs` | the typed surface manifest |
+| `$h->call(verb, args)` | `app__call` | invoke a verb, return its value |
+| `$h->get(state)` | `app__get` | read a state query |
+| `$h->sub(event)` | `app__sub` | subscribe (events buffer) |
+| `$h->poll()` | `app__poll` | drain events since the last poll |
 | `$h->undo(verb, args, result)` | `app__undo` | compensate one executed verb, out of band |
 | `App::txn([id])` | `app__txn_begin` | open a cross-app compensating transaction |
 | `$txn->call(app, verb, args)` | `app__txn_call` | one journaled step of the transaction |
@@ -102,7 +102,7 @@ Newline-delimited JSON over the app's endpoint — a Unix socket
 named pipe `\\.\pipe\<app>.sock` on Windows. A request stamps a fresh `id`; the client reads until
 the matching `reply`, buffering any interleaved `event` frames for `poll`. Transport
 errors reconnect once and retry, re-joining an open transaction on the fresh connection first.
-Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1, transactions in §7.2/§7.3.
+Full frame spec in `docs/GUI_AUTOMATION_BUS.md` §7.1, transactions in §7.2/§7.3.
 
 ## Build
 
