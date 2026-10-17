@@ -74,7 +74,7 @@ compensating each step with one `undo` frame to the app that ran it, then releas
 journals so no inverse runs twice. A compensation that fails does not stop the unwind and is
 reported — globally in `failed[]` and under `apps.<name>.failed[]`.
 
-Design and the reason a per-app `abort` is not enough: [`GUI_AUTOMATION_BUS.md`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta/blob/main/docs/GUI_AUTOMATION_BUS.md) §7.3.
+Per-app journal frames (`begin`, `commit`, `abort`, `undo`): [`GUI_AUTOMATION_BUS.md`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta/blob/main/docs/GUI_AUTOMATION_BUS.md) §7.2. The cross-app ledger that sequences steps across apps is `src/saga.rs`.
 
 ## Surface
 
@@ -102,7 +102,7 @@ Newline-delimited JSON over the app's endpoint — a Unix socket
 named pipe `\\.\pipe\<app>.sock` on Windows. A request stamps a fresh `id`; the client reads until
 the matching `reply`, buffering any interleaved `event` frames for `poll`. Transport
 errors reconnect once and retry, re-joining an open transaction on the fresh connection first.
-Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1, transactions in §7.2/§7.3 (linked above).
+Full frame spec in `GUI_AUTOMATION_BUS.md` §7.1, per-app transactions in §7.2 (linked above).
 
 ## Build
 
